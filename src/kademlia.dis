@@ -1,0 +1,542 @@
+"""
+- Module: This is the main interface that combines all the required functionalities for Kademlia together
+- CSE690 Concurrent and Distributed Algorithms
+- Nitin Aggarwal (SBU ID: 108266663)
+- Kademlia - A peer-to-peer network DHT
+"""
+
+# Import the required modules
+from node import Node
+from distalgo.runtime.sim import DistProcess
+from routingTable import RoutingTable
+from hash import computeIntHash, newID
+from constants import TIMEOUT, STABLE, KVUPDATE, SLEEP
+import time
+from threading import Timer
+
+class KademliaBootstrap(DistProcess):
+    """
+    It is the class that creates bootstrap object, that helps node join the network
+    """    
+    def setup(processId):
+        """ 
+        it initializes the object variables  
+        @param processId: the process Id node belongs to
+        @type processId: integer
+        """
+        node = Node(processId)
+        routingTable = RoutingTable(node)
+        hashTable = {}
+        tokenFlag = False
+    	
+    def OnMessage(message, n, status):
+        """ 
+        represents the method that is called on receiving a message from peer nodes
+           1. Different Messages are
+              - joinKademlia * request from node to join the network
+              - dead * to notify that node is leaving the network
+        @param message: it refers to the message type
+        @type message: string
+        @param n: it refers to the node object
+        @type n: Kademlia.node.Node
+        @param status: it states whether node info to be added to routing table
+        @type status: boolean value true or false
+        """  
+        output(str([node.processId]) +" Message from: " + str([_source]) + " message: " + message)
+        if message == str("joinKademlia"):
+        	if status:
+        		routingTable.addPeer(n)
+        	nodes = routingTable.findNodes(node.nodeId)
+        	send(Message("kBNodes", nodes, None), _source)
+        elif message == str("dead"):
+        	output(str([node.processId]) +" Dead Node: "+ str([n.processId]) +" removed")
+        	routingTable.removePeer(n)  
+        else:
+        	output("Other message")
+    		
+    def main():
+        """
+        it is the main program that executes when a process or thread is started for the node
+        """
+        output("I am bootstrap node with PID: " + str([node.processId]) + " hashInt: " + str(node.nodeId))
+        await(tokenFlag)
+    	
+class KademliaNode(DistProcess):    
+    def setup(bootStrap, processId):
+        """ 
+        it initializes the object variables  
+        @param bootStrap: the process Id of the bootstrap node
+        @type bootStrap: integer
+        @param processId: the process Id node belongs to
+        @type processId: integer
+        """  
+        bootStrapId = bootStrap
+        node = Node(processId)
+        routingTable = RoutingTable(node)
+        hashTable = {}
+        kVResponsible = {}
+        tokenFlag = False
+
+        # to keep count for peers replied for find nodes operation
+        repliedKN = set()
+        # to keep count for peers replied for find value operation
+        repliedKV = set()
+        # to keep count for peers replied for ping operation
+        replied = set()
+        # to keep count for peers replied for store operation
+        repliedStore = set()
+        
+        searchValue = None
+        callFlag = False
+    	
+    def OnMessage(message, n, value):
+        """ 
+        represents the method that is called on receiving a message from peer nodes  
+           1. Different Messages are
+              - findNodes  * k nodes closer to nodeId request
+              - findValue  * value for the key or k nodes closer to nodeId request
+              - storeKV    * to store key value pair in the hash table
+              - kBNodes    * k nodes received from the bootstrap node
+              - kNodes     * k nodes received from the peer node
+              - valueNodes * value or k nodes closer to the key receuved from the peer
+              - ping       * ping message from peer
+              - alive      * status sent to peer for ping
+              - stored     * notifies that sent key value pair has been stored
+              - done       * notifies that requested call has been completed
+
+        @param message: it refers to the message type
+        @type message: string
+        @param n: it refers to the first argument for the message
+        @type n: Kademlia.node.Node, integer, list of nodes, empty
+        @param value: it refers to the second argument for the message
+        @type value: Kademlia.node.Node, integer, list of nodes, empty
+        """  
+        #if message != str("alive") and message != str("ping"):
+        output(str([node.processId]) +" Message from: " + str([_source]) + " message: " + message)
+        if message == str("findNodes"):			# k nearest nodes request from neighbor
+        	routingTable.addPeer(n)
+        	nodes = findKNodes(value)
+        	send(Message("kNodes", nodes, None), _source)
+        elif message == str("findValue"):		# find value request from neighbors
+        	if value in hashTable:
+        		output(str([node.processId])+ " Value found, so returning value instead of nodes")
+        		send(Message("valueNodes", None, hashTable[value]), _source)
+        	else:
+        		nodes = findKNodes(value)
+        		send(Message("valueNodes", nodes, None), _source)
+        elif message == str("storeKV"): 		# store key-value pairs
+        	store(n, value)
+        	send(Message("stored",node, None), _source)
+        elif message == str("kBNodes"):			# k nodes from bootstrap
+        	for peer in n:
+        		routingTable.addPeer(peer)
+        elif message == str("kNodes"):			# k nodes from neighbor
+        	for peer in n:
+        		routingTable.addPeer(peer)
+        	repliedKN.add(_source)
+        elif message == str("valueNodes"):  		# k nodes or value from neighbor
+        	if value != None:
+        		searchValue = value
+        	else:
+        		for peer in n:
+        			routingTable.addPeer(peer)
+        	repliedKV.add(_source)
+        elif message == str("ping"):			# ping the peer
+        	send(Message("alive",node, None), _source)
+        elif message == str("alive"):    		# response for ping from peer
+        	replied.add(n)
+        elif message == str("stored"):			# response for story kay-value operation
+        	repliedStore.add(n)
+        elif message == str("done"):			# response for call request operation
+        	status = True	
+
+    def OnCallMessage(func,args1,args2):
+        """
+        it receives the message from the test node to perform
+        different functions for the testing purposes  
+           1. Different Messages are
+              - findNodesCall  * perform find k node iterative operation with node id provided
+              - findValueCall  * perform find value iterative operation with key provided
+              - storeCall      * perform store iterative operation for key value pair provided
+              - failCall       * perform failure operation
+        """
+        if callFlag:
+        	return
+        callFlag = True
+        output(str([node.processId]) +" Call Message from: " + str([_source]) + " message: " + func)
+        if func == str("findNodesCall"):
+        	start_time = time.time()
+        	findKNodesIterative(args1)
+        	print("Time taken to find nodes Iteratively: "+str(time.time() - start_time) + " seconds")
+        elif func == str("findValueCall"):
+        	findValueIterative(args1)
+        elif func == str("storeCall"):
+        	storeKVIterative(args1,args2)
+        elif func == str("failCall"):
+        	send(Message("dead", node, None),bootStrapId)
+        	tokenFlag = True
+        callFlag = False
+        send(Message("done", node, None),_source)
+ 
+    def stabilize():
+        """
+        stabilizes the routing table of the node, by
+        sending timely ping messages to peers in the routing table
+        """  
+        while(True):
+        	totalPeers = 0
+        	listpeers = []
+        	for bucket in routingTable.bucketList:
+        		totalPeers += len(bucket.peerList)
+        		listpeers += bucket.peerList    		
+        		for peer in bucket.peerList:
+        			send(Message("ping", node, None),peer.processId)
+        	await(len(replied) == totalPeers, 8*TIMEOUT)
+        	for peer in [x for x in listpeers if x not in replied]:
+        		output(str([node.processId]) +" Dead Node: "+ str([peer.processId]) +" removed in stabilize")
+        		routingTable.removePeer(peer)
+        	output(str([node.processId])+" Routing Table refreshed")
+        	replied = set()
+        	time.sleep(STABLE)
+    	
+    def stabilizeKV():
+    	"""
+        stabilizes the hash table of the network, by
+        sending timely storeKV messages to peers in the network,
+        to accommodate the failure the nodes with KV pairs
+        """
+    	while(True):
+        	for key,value in kVResponsible.items():
+        		storePeers = findKNodesIterative(key)
+        		for peer in storePeers:
+        			send(Message("storeKV",key,value),peer.processId)
+        	if len(list(kVResponsible.keys())) > 0:
+        		output(str([node.processId])+" Key Value Responsibility fulfilled")
+        	time.sleep(KVUPDATE)
+
+    def findKNodes(value):
+        """
+        returns the K closest nodes to the provided value
+        from the local routing table
+        @param value: id whose nearest nodes to be found
+        @type value: integer
+        @return: list of nodes that are nearest to the provided value
+        """
+        return routingTable.findNodes(value)
+    
+    def findKNodesIterative(value):
+        """
+        returns the K closest nodes to the provided value
+        in an iterative manner by sending message to nodes from the local routing table
+        @param value: id whose nearest nodes to be found
+        @type value: integer
+        @return: list of nodes that are nearest to the provided value
+        """
+        output(str([node.processId])+" Calling find Nodes Iterative")
+        peers = routingTable.findNodes(value)
+        newpeers = peers
+        print("Routing Table before Iterative call:")
+        routingTable.printBucketList()
+        output("List: "+str(newpeers))
+        iterationCount = 0
+        while True:
+            iterationCount += 1
+            peers = newpeers
+            for peer in peers:
+                send(Message("findNodes", node, value), peer.processId)
+            await(len(repliedKN) == len(peers), TIMEOUT)
+            
+            newpeers = routingTable.findNodes(value)
+            newpeers = list(set(newpeers))
+            output("New list: "+str(newpeers))
+            repliedKN = set()
+            flagCont = False
+            if[x for x in peers if x not in newpeers] or [y for y in newpeers if y not in peers]:
+                flagCont = True
+            if(not flagCont):
+                break
+        print("Routing Table after Iterative call:")
+        routingTable.printBucketList()
+        print("Find K Nodes Iterative Iterations: "+str(iterationCount))
+        return newpeers
+       
+    def findValueIterative(key):
+        """
+        returns the value if key exist in hash table otherwise,
+        return K closest nodes to the provided value
+        in an iterative manner by sending message to nodes from the local routing table
+        @param key: id whose nearest nodes to be found
+        @type key: integer
+        @return: value or list of nodes that are nearest to the provided value
+        """
+        searchValue = None
+        output(str([node.processId])+" Calling find Value Iterative for key: "+str(key))
+        iterationCount = 0
+        start_time = time.time()
+        if key in hashTable:
+        	value = hashTable[key]
+        	output(str([node.processId])+" Value found in local table "+str(value))
+        	output("Time taken to find key: "+ str(key) +" Iteratively: "+str(time.time() - start_time) + " seconds Iterations: "+str(iterationCount))
+        	return
+        peers = routingTable.findNodes(key)
+        newpeers = peers
+        while True:
+        	iterationCount += 1
+        	peers = newpeers
+        	for peer in peers:
+        		send(Message("findValue", None, key), peer.processId)
+        	await(len(repliedKV) == len(peers), TIMEOUT)
+        	newpeers = routingTable.findNodes(key)
+        	newpeers = list(set(newpeers))
+        	output("New list: "+str(newpeers))
+        	repliedKV = set()
+        	flagCont = False
+        	if [x for x in peers if x not in newpeers] or [y for y in newpeers if y not in peers]:
+        		flagCont = True
+        	if searchValue != None:
+        		output(str([node.processId])+" Found - Key: "+ str(key) +" Value: "+str(searchValue))
+        		output("Time taken to find key: "+ str(key) +" Iteratively: "+str(time.time() - start_time) + " seconds Iterations: "+str(iterationCount)) 
+        		return
+        	elif not flagCont:
+        		break
+        output(str([node.processId])+" Not found - Key: "+ str(key) +" ***********")
+        output("Time taken to find key: "+ str(key) +" Iteratively: "+str(time.time() - start_time) + " seconds Iterations: "+str(iterationCount)) 
+        
+	
+    def store(key, value):
+    	"""
+        stores the provided key value pair in the hash table
+        @param key: key to be stored in the hash table
+        @type key: integer
+        @param value: value to be stored in the hash table
+        @type value: integer
+        """
+    	if key not in hashTable:
+    		hashTable[key] = value
+    		output(str([node.processId])+" stored KV pair with value: "+str(value))
+        
+    def storeKVIterative(key, value):
+    	"""
+        stores the provided key value pair in the hash table in 
+        an iterative manner by finding the K suitable nodes in the network,
+        and sending them messages to store key-value pairs
+        @param key: key to be stored in the hash table
+        @type key: integer
+        @param value: value to be stored in the hash table
+        @type value: integer
+        """
+    	kVResponsible[key] = value
+    	repliedStore = set() 
+    	output(str([node.processId])+" Calling store key value Iterative")
+    	start_time = time.time()
+    	storePeers = findKNodesIterative(key)
+    	for peer in storePeers:
+    		send(Message("storeKV",key,value),peer.processId)
+    	await(len(repliedStore) == len(storePeers))
+    	print("Time taken to store key values Iteratively: "+str(time.time() - start_time) + " seconds") 
+
+    def timers():
+        """
+        starts the timer to stabilize the routing table and 
+        key-value mapping in the network
+        """
+    	# A Timer thread to stabilize routing table at intervals
+        t1 = Timer(10.0, stabilize)
+        t1.start()
+
+        # A Timer thread to stabilize key-value pairs at intervals
+        t2 = Timer(20.0, stabilizeKV)
+        t2.start()
+
+    def main():
+        """
+        it is the main program that executes when a process or thread is started for the node
+        """
+        output("My details are PID: " + str([node.processId]) + " bootId: " + str([bootStrapId]) + " hashInt: " + str(node.nodeId))
+        send(Message("joinKademlia", node, True), bootStrapId)
+        timers()
+        await(tokenFlag)
+        output(str([node.processId]) +" Node failure")
+
+class KademliaTest(KademliaNode, DistProcess):    
+    def setup(bootStrap, processId):
+        """ 
+        it initializes the object variables  
+        @param bootStrap: the process Id of the bootstrap node
+        @type bootStrap: integer
+        @param processId: the process Id node belongs to
+        @type processId: integer
+        """  
+        bootStrapId = bootStrap
+        node = Node(processId)
+        routingTable = RoutingTable(node)
+        hashTable = {}
+        kVResponsible = {}
+        tokenFlag = False
+        repliedKN = set()
+        repliedKV = set()
+        replied = set()
+        repliedStore = set()
+        searchValue = None
+        status = False
+    	
+    def OnMessage(message, n, value):
+    	""" 
+        represents the method that is called on receiving a message from peer nodes  
+           1. Different Messages are
+              - findNodes  * k nodes closer to nodeId request
+              - findValue  * value for the key or k nodes closer to nodeId request
+              - storeKV    * to store key value pair in the hash table
+              - kBNodes    * k nodes received from the bootstrap node
+              - kNodes     * k nodes received from the peer node
+              - valueNodes * value or k nodes closer to the key receuved from the peer
+              - ping       * ping message from peer
+              - alive      * status sent to peer for ping
+              - stored     * notifies that sent key value pair has been stored
+              - done       * notifies that requested call has been completed
+
+        @param message: it refers to the message type
+        @type message: string
+        @param n: it refers to the first argument for the message
+        @type n: Kademlia.node.Node, integer, list of nodes, empty
+        @param value: it refers to the second argument for the message
+        @type value: Kademlia.node.Node, integer, list of nodes, empty
+        """    
+    	if message != str("alive") and message != str("ping"):
+    		output(str([node.processId]) +" Message from: " + str([_source]) + " message: " + message)
+    	if message == str("findNodes"):		# k nearest nodes request from neighbor
+    		routingTable.addPeer(n)
+    		nodes = findKNodes(value)
+    		send(Message("kNodes", nodes, None), _source)
+    	elif message == str("findValue"):	# find value request from neighbours
+    		if value in hashTable:
+    			output(str([node.processId])+ " Value found, so returning value instead of nodes")
+    			send(Message("valueNodes", None, hashTable[value]), _source)
+    		else:
+    			nodes = findKNodes(value)
+    			send(Message("valueNodes", nodes, None), _source)
+    	elif message == str("storeKV"): 	# store key-value pairs
+    		store(n, value)
+    		send(Message("stored",node, None), _source)
+    	elif message == str("kBNodes"):		# k nodes from bootstrap
+    		for peer in n:
+    			routingTable.addPeer(peer)
+    	elif message == str("kNodes"):		# k nodes from neighbor
+    		for peer in n:
+    			routingTable.addPeer(peer)
+    		repliedKN.add(_source)
+    	elif message == str("valueNodes"):  	# k nodes or value from neighbor
+    		if value != None:
+    			searchValue = value
+    		else:
+    			for peer in n:
+    				routingTable.addPeer(peer)
+    		repliedKV.add(_source)
+    	elif message == str("ping"):
+    		send(Message("alive",node, None), _source)
+    	elif message == str("alive"):    
+    		replied.add(n)
+    	elif message == str("stored"):
+    		repliedStore.add(n)
+    	elif message == str("done"):
+    		status = True	
+
+    def main():
+        """
+        it is the main program that executes when a process or thread is started for the node
+        """
+        output("Details are PID: " + str([node.processId]) + " bootId: " + str([bootStrapId]) + " hashInt: " + str(node.nodeId))
+        send(Message("joinKademlia", node, False), bootStrapId)
+        await(len(routingTable.bucketList[0].peerList) > 0)
+        self.timers()
+        output("********************** Find Node Testing ****************************")
+        findNode = routingTable.randomPeer()
+        status = False
+        send(CallMessage("findNodesCall", computeIntHash(newID()),None), findNode.processId)
+        await(status)
+        time.sleep(SLEEP)
+        output("********************** Store Key Value Testing ****************************")
+        key1 = computeIntHash(newID())
+        findNode = routingTable.randomPeer()
+        status = False
+        send(CallMessage("storeCall", key1,"nitin"), findNode.processId)
+        await(status)
+        key11 = computeIntHash(newID())
+        count = 0
+        nodeTemp = None
+        #self.storeKVIterative(key1,"nitin")
+        for bucket in routingTable.bucketList:
+        	for peer in bucket.peerList:
+        		nodeTemp = peer
+        		print("hi "+str(peer.processId))
+        		count = count + 1
+        		value = "value" + str(count)
+        		status = False
+        		send(CallMessage("storeCall", computeIntHash(newID()),value), nodeTemp.processId)
+        		await(status)
+        time.sleep(SLEEP)
+        output("********************** Find Key Value Testing ****************************")
+        findNode = routingTable.randomPeer()
+        status = False
+        send(CallMessage("findValueCall", key1,None), findNode.processId)
+        await(status)
+        status = False
+        send(CallMessage("findValueCall", key11,None), nodeTemp.processId)
+        await(status)
+        status = False
+        send(CallMessage("findValueCall", computeIntHash(newID()),None), nodeTemp.processId)
+        await(status)
+        time.sleep(SLEEP)
+        output("********************** Node Failure Testing ****************************")
+        findNode = routingTable.randomPeer()
+        status = False
+        send(CallMessage("failCall", None, None), findNode.processId)
+        await(status)
+        await(tokenFlag)
+        
+def main():
+    """
+    It is the driver function that sets up the network for deployment and testing
+    """
+    print("Running Kademlia Protocol")
+    print("********* Starting Bootstrap Node **********************")
+    bootStrapList = createprocs(KademliaBootstrap, 1)
+    bootStrapNode = None
+    for proc in bootStrapList:
+        bootStrapNode = proc
+        setupprocs({proc}, [proc])
+    startprocs(bootStrapList)
+    time.sleep(3)
+	
+    print("*********** New nodes joining the Kademlia Network ******")
+    numProcesses = 10
+    processList = list(createprocs(KademliaNode, numProcesses))
+	
+    # Run appropriate setup functions
+    for proc in processList:
+        setupprocs({proc}, [bootStrapNode, proc])
+
+    # Start the processes
+    startprocs(processList)
+	
+    time.sleep(3)
+    print("*********** Test node joining the Kademlia Network ******")
+    testProcess = list(createprocs(KademliaTest, 1))
+	
+    # Run appropriate setup functions
+    for proc in testProcess:
+    	setupprocs({proc}, [bootStrapNode, proc])
+
+    # Start the processes
+    startprocs(testProcess)
+
+    time.sleep(25)
+    print("*********** New node joining the Kademlia Network ******")
+    newProcess = list(createprocs(KademliaNode, 1))
+
+    # Run appropriate setup functions
+    for proc in newProcess:
+        setupprocs({proc}, [bootStrapNode, proc])
+
+    # Start the processes
+    startprocs(newProcess)
